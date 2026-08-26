@@ -135,7 +135,15 @@ class ManageIQ::Providers::IbmCloud::PowerVirtualServers::CloudManager::Provisio
   end
 
   def set_request_values(values)
-    values[:new_volumes] = parse_new_volumes_fields(values)
+    values[:new_volumes]    = parse_new_volumes_fields(values)
+
+    # Power VS creates all replicas in a single API call (replicants field).
+    # Store the real count under :replicants so the provision task can pass it
+    # to the SDK, then clamp :number_of_vms to 1 so core only creates one task.
+    number_of_vms           = get_value(values[:number_of_vms]).to_i
+    values[:replicants]     = number_of_vms
+    values[:number_of_vms]  = [1, "1"]
+
     super
   end
 
@@ -152,9 +160,13 @@ class ManageIQ::Providers::IbmCloud::PowerVirtualServers::CloudManager::Provisio
     end
 
     new_volumes.drop(1).map! do |new_volume|
-      new_volume[:size] = new_volume[:size].to_i
+      new_volume[:size]      = new_volume[:size].to_i
       new_volume[:shareable] = [nil, 'null'].exclude?(new_volume[:shareable])
       new_volume[:disk_type] = storage_type
+      # Normalise the base name; the zero-padded sequential suffix (e.g. "001")
+      # is appended later in prepare_volumes_and_networks to produce names like
+      # "datavol001", "datavol002".
+      new_volume[:name] = new_volume[:name].presence || "vol"
       new_volume
     end
   end
@@ -214,6 +226,20 @@ class ManageIQ::Providers::IbmCloud::PowerVirtualServers::CloudManager::Provisio
     # Shared processor pools are used and shared by a set of virtual server instances of the same machine type (host).
     valid = vms_in_resource_pool.first.flavor.name == values&.dig(:sys_type, 1)
     _('Invalid processor pool - incompatible machine type (host)') unless valid
+  end
+
+  def update_field_visibility
+    multi_vm = get_value(@values[:number_of_vms]).to_i > 1
+
+    if multi_vm
+      show_fields(:hide,   [:placement_group, :shared_processor_pool])
+      show_fields(:edit,   [:colocation_policy])
+    else
+      show_fields(:edit,   [:placement_group, :shared_processor_pool])
+      show_fields(:hide,   [:colocation_policy])
+    end
+
+    super
   end
 
   private
