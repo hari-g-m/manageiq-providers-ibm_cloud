@@ -3,26 +3,35 @@ describe ManageIQ::Providers::IbmCloud::PowerVirtualServers::CloudManager::Metri
   let(:vm)  { FactoryBot.create(:vm_ibm_cloud_power_virtual_servers, :ext_management_system => ems, :name => "test-pvm-instance", :ems_ref => "aaaabbbb-1111-2222-3333-ccccddddeeee") }
 
   describe "#perf_collect_metrics" do
+    subject { described_class.new(vm) }
+
     it "collects metrics and stores datapoints" do
-      VCR.use_cassette(described_class.name.underscore) do
-        vm.perf_capture_realtime
-      end
+      fake_response = instance_double(RestClient::Response, :body => JSON.generate(
+        "data" => [
+          {"t" => 1_700_000_000, "d" => [50.0, 60.0, 1024.0, 512.0, 2048.0, 1024.0]},
+          {"t" => 1_700_000_060, "d" => [55.0, 65.0, 2048.0, 1024.0, 4096.0, 2048.0]},
+        ]
+      ))
 
-      vm.reload
+      allow(subject).to receive(:iam_access_token).and_return("fake-token")
+      allow(RestClient::Request).to receive(:execute).and_return(fake_response)
 
-      expect(vm.metrics.count).to be > 0
+      counters, counter_values = subject.perf_collect_metrics("realtime")
+
+      expect(counters[vm.ems_ref]).to include("cpu_usage_rate_average")
+      expect(counter_values[vm.ems_ref]).not_to be_empty
     end
   end
 
   describe "#build_metrics_query" do
     subject { described_class.new(vm) }
 
-    it "produces a v2Metrics payload with all six PowerVS metric IDs" do
+    it "produces a payload with all six PowerVS metric IDs" do
       query = subject.send(:build_metrics_query, "my-pvm", 3600)
 
-      expect(query[:dataSourceType]).to eq("v2Metrics")
-      expect(query[:start]).to eq(-3600)
-      expect(query[:end]).to eq(0)
+      expect(query[:dataSourceType]).to eq("host")
+      expect(query[:last]).to eq(3600)
+      expect(query[:sampling]).to eq(60)
       expect(query[:filter]).to include("my-pvm")
       metric_ids = query[:metrics].map { |m| m[:id] }
       expect(metric_ids).to include(
@@ -35,10 +44,10 @@ describe ManageIQ::Providers::IbmCloud::PowerVirtualServers::CloudManager::Metri
       )
     end
 
-    it "uses the passed sample_window as the start offset" do
+    it "uses the passed sample_window as the :last value" do
       query = subject.send(:build_metrics_query, "my-pvm", 7_200)
 
-      expect(query[:start]).to eq(-7_200)
+      expect(query[:last]).to eq(7_200)
     end
   end
 
