@@ -18,11 +18,19 @@ module ManageIQ::Providers::IbmCloud::PowerVirtualServers::ManagerMixin
     require "ibm_cloud_power"
     power_api_client = IbmCloudPower::ApiClient.new
 
-    power_api_client.config.api_key = auth_key
-    power_api_client.config.scheme  = "https"
-    power_api_client.config.host    = api_endpoint_url(location)
-    power_api_client.config.logger  = $ibm_cloud_log
+    power_api_client.config.api_key   = auth_key
+    power_api_client.config.scheme    = "https"
+    power_api_client.config.host      = api_endpoint_url(location)
+    power_api_client.config.logger    = $ibm_cloud_log
     power_api_client.config.debugging = Settings.log.level_ibm_cloud == "debug"
+
+    # Disable SSL verification when the endpoint is configured to skip it.
+    # Useful for local dev/test environments with self-signed certs.
+    if default_endpoint&.verify_ssl == OpenSSL::SSL::VERIFY_NONE
+      power_api_client.config.verify_ssl      = false
+      power_api_client.config.verify_ssl_host = false
+    end
+
     power_api_client.default_headers["Crn"]           = power_iaas_service["crn"]
     power_api_client.default_headers["Authorization"] = "#{token.token_type} #{token.access_token}"
 
@@ -128,6 +136,46 @@ module ManageIQ::Providers::IbmCloud::PowerVirtualServers::ManagerMixin
                     }
                   ]
                 },
+                {
+                  :component => 'tab-item',
+                  :id        => 'metrics-tab',
+                  :name      => 'metrics-tab',
+                  :title     => _('Metrics'),
+                  :fields    => [
+                    {
+                      :component    => 'protocol-selector',
+                      :id           => 'metrics_selection',
+                      :name         => 'metrics_selection',
+                      :skipSubmit   => true,
+                      :initialValue => 'none',
+                      :label        => _('Type'),
+                      :options      => [
+                        {
+                          :label => _('Disabled'),
+                          :value => 'none',
+                        },
+                        {
+                          :label => _('Enabled'),
+                          :value => 'enable_metrics',
+                          :pivot => 'endpoints.metrics.options.monitoring_instance_id',
+                        },
+                      ],
+                    },
+                    {
+                      :component              => 'password-field',
+                      :id                     => 'endpoints.metrics.options.monitoring_instance_id',
+                      :name                   => 'endpoints.metrics.options.monitoring_instance_id',
+                      :label                  => _('IBM Cloud Monitoring Instance GUID'),
+                      :helperText             => _('Found under Observability > Monitoring in the IBM Cloud console. The Monitoring instance must be in the same region as this PowerVS workspace and configured to receive IBM Power Virtual Server metrics.'),
+                      :validationDependencies => %w[type zone_id metrics_selection],
+                      :isRequired             => true,
+                      :condition              => {
+                        :when => 'metrics_selection',
+                        :is   => 'enable_metrics',
+                      },
+                    },
+                  ]
+                },
               ]
             ]
           }
@@ -137,20 +185,33 @@ module ManageIQ::Providers::IbmCloud::PowerVirtualServers::ManagerMixin
 
     def verify_credentials(args)
       pcloud_guid = args["uid_ems"]
-      auth_key = args.dig("authentications", "default", "auth_key")
-      auth_key = ManageIQ::Password.try_decrypt(auth_key)
-      auth_key ||= find(args["id"]).authentication_token('default')
+      auth_key    = args.dig("authentications", "default", "auth_key")
+      auth_key    = ManageIQ::Password.try_decrypt(auth_key)
+      auth_key  ||= find(args["id"]).authentication_token('default')
 
-      !!raw_connect(auth_key, pcloud_guid)
+      # Respect the SSL setting already saved on the provider, defaulting to
+      # VERIFY_NONE for new providers so local/test setups work out of the box.
+      verify_ssl = if args["id"]
+                     find(args["id"]).default_endpoint&.verify_ssl
+                   else
+                     OpenSSL::SSL::VERIFY_NONE
+                   end
+
+      !!raw_connect(auth_key, pcloud_guid, verify_ssl)
     end
 
-    def raw_connect(api_key, pcloud_guid)
+    def raw_connect(api_key, pcloud_guid, verify_ssl = OpenSSL::SSL::VERIFY_NONE)
       if api_key.blank? || pcloud_guid.blank?
         raise MiqException::MiqInvalidCredentialsError, _("Missing credentials")
       end
 
       require "ibm_cloud_iam"
       iam_token_api = IbmCloudIam::TokenOperationsApi.new
+
+      if verify_ssl == OpenSSL::SSL::VERIFY_NONE
+        iam_token_api.api_client.config.verify_ssl      = false
+        iam_token_api.api_client.config.verify_ssl_host = false
+      end
 
       begin
         token = iam_token_api.get_token_api_key("urn:ibm:params:oauth:grant-type:apikey", api_key)
@@ -163,6 +224,10 @@ module ManageIQ::Providers::IbmCloud::PowerVirtualServers::ManagerMixin
       require "ibm_cloud_resource_controller"
       authenticator = IbmCloudResourceController::Authenticators::BearerTokenAuthenticator.new(:bearer_token => token.access_token)
       resource_controller_api = IbmCloudResourceController::ResourceControllerV2.new(:authenticator => authenticator)
+
+      if verify_ssl == OpenSSL::SSL::VERIFY_NONE
+        resource_controller_api.configure_http_client(:disable_ssl_verification => true)
+      end
 
       begin
         power_iaas_service = resource_controller_api.get_resource_instance(:id => pcloud_guid).result
