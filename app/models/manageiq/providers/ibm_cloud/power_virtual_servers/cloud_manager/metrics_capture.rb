@@ -45,39 +45,18 @@ class ManageIQ::Providers::IbmCloud::PowerVirtualServers::CloudManager::MetricsC
   # IBM Cloud Monitoring metric names for PowerVS (ibm_power_iaas namespace).
   # Order here must match the index positions used in #consolidate_data.
   POWERVS_METRICS = [
-    "ibm_power_iaas_pvm_instance_cpu_util",             # index 0 -> cpu %
-    "ibm_power_iaas_pvm_instance_mem_util",             # index 1 -> mem %
+    "ibm_power_iaas_pvm_instance_cpu_util",               # index 0 -> cpu %
+    "ibm_power_iaas_pvm_instance_mem_util",               # index 1 -> mem %
     "ibm_power_iaas_pvm_instance_network_incoming_bytes", # index 2 -> net in (bytes)
     "ibm_power_iaas_pvm_instance_network_outgoing_bytes", # index 3 -> net out (bytes)
-    "ibm_power_iaas_pvm_instance_disk_read_bytes",      # index 4 -> disk read (bytes)
-    "ibm_power_iaas_pvm_instance_disk_write_bytes",     # index 5 -> disk write (bytes)
+    "ibm_power_iaas_pvm_instance_disk_read_bytes",        # index 4 -> disk read (bytes)
+    "ibm_power_iaas_pvm_instance_disk_write_bytes",       # index 5 -> disk write (bytes)
   ].freeze
 
-  # IBM Cloud Monitoring enforces a maximum query window of 36,000 seconds (10 hours).
-  MAX_SAMPLE_WINDOW = 36_000
-
-  # Maps PowerVS region slugs (used as provider_region on the EMS) to the
-  # IBM Cloud Monitoring regional hostname prefix.
-  # Source: https://cloud.ibm.com/docs/monitoring?topic=monitoring-endpoints
-  # PowerVS regions that share the same IBM Cloud data center as a VPC region
-  # use that VPC region's monitoring endpoint.
-  MONITORING_REGION_MAP = {
-    "dal"      => "us-south",   # Dallas
-    "us-south" => "us-south",   # Dallas (alternate slug)
-    "wdc"      => "us-east",    # Washington DC
-    "us-east"  => "us-east",    # Washington DC (alternate slug)
-    "tor"      => "ca-tor",     # Toronto
-    "mon"      => "ca-mon",     # Montreal
-    "sao"      => "br-sao",     # Sao Paulo
-    "eu-de"    => "eu-de",      # Frankfurt
-    "lon"      => "eu-gb",      # London
-    "mad"      => "eu-es",      # Madrid
-    "syd"      => "au-syd",     # Sydney
-    "tok"      => "jp-tok",     # Tokyo
-    "osa"      => "jp-osa",     # Osaka
-  }.freeze
-
   def perf_collect_metrics(interval_name, start_time = nil, end_time = nil)
+    # IBM Cloud does not publish a Ruby SDK for the Monitoring Data API (/api/data).
+    # The existing ibm_cloud_sdk_core / ibm_cloud_iam SDKs cover IAM and resource
+    # management only, so we use rest-client for the metrics query directly.
     require 'rest-client'
 
     raise _("No EMS defined") if ext_management_system.nil?
@@ -87,11 +66,10 @@ class ManageIQ::Providers::IbmCloud::PowerVirtualServers::CloudManager::MetricsC
     start_time ||= end_time - 4.hours
     start_time   = start_time.utc
 
-    # Clamp window to the API maximum.
-    sample_window = [(end_time.to_i - start_time.to_i), MAX_SAMPLE_WINDOW].min
+    sample_window = end_time.to_i - start_time.to_i
 
-    counters_by_mor        = {target.ems_ref => VIM_STYLE_COUNTERS}
-    counter_values_by_mor  = {target.ems_ref => {}}
+    counters_by_mor       = {target.ems_ref => VIM_STYLE_COUNTERS}
+    counter_values_by_mor = {target.ems_ref => {}}
 
     metrics_endpoint = ext_management_system.metrics_endpoint
     raise _("No metrics endpoint has been added") if metrics_endpoint.nil?
@@ -128,9 +106,9 @@ class ManageIQ::Providers::IbmCloud::PowerVirtualServers::CloudManager::MetricsC
 
   private
 
-  # Build the IBM Cloud Monitoring v2Metrics query payload.
+  # Build the IBM Cloud Monitoring query payload.
   # @param instance_name [String] PVM instance name used as the label filter.
-  # @param sample_window [Integer] Seconds to look back from "now" (max 36,000).
+  # @param sample_window [Integer] Seconds to look back from "now".
   def build_metrics_query(instance_name, sample_window)
     {
       :last           => sample_window,
@@ -149,20 +127,24 @@ class ManageIQ::Providers::IbmCloud::PowerVirtualServers::CloudManager::MetricsC
   end
 
   # Resolve the IBM Cloud Monitoring regional endpoint hostname prefix from the
-  # PowerVS location stored on the EMS (e.g. "dal10" or "dal" -> "us-south").
-  # The EMS stores the raw CRN location which may include a numeric zone suffix
-  # (e.g. "dal10", "eu-de-2") — strip it the same way api_endpoint_url does.
-  # Raises if the region is blank or has no known mapping.
+  # PowerVS region stored on the EMS (e.g. "dal10" -> "us-south").
+  # The :monitoring_endpoint key in the Regions registry maps each PowerVS region
+  # slug to the corresponding IBM Cloud Monitoring endpoint prefix.
+  # Source: https://cloud.ibm.com/docs/monitoring?topic=monitoring-endpoints
   def monitoring_region
-    raw = ext_management_system.provider_region.presence ||
-          raise(_("Cannot determine monitoring region: provider_region is blank"))
+    raw = ext_management_system.provider_region.presence
+    raise "Cannot determine monitoring region: provider_region is blank" if raw.nil?
 
     # "dal10" -> "dal", "eu-de-2" -> "eu-de", "us-south" -> "us-south"
     pvs_region = raw.sub(/-*\d+$/, '')
 
-    MONITORING_REGION_MAP[pvs_region] ||
-      raise(_("No IBM Cloud Monitoring endpoint is known for PowerVS region '%{region}'. " \
-              "Ensure IBM Cloud Monitoring is enabled in that region and update MONITORING_REGION_MAP.") % {:region => pvs_region})
+    region_data = ManageIQ::Providers::IbmCloud::PowerVirtualServers::Regions.regions[pvs_region]
+    unless region_data&.dig(:monitoring_endpoint)
+      raise _("IBM Cloud Monitoring is not available for PowerVS region '%{region}'. " \
+              "Ensure an IBM Cloud Monitoring instance exists in the same region as this PowerVS workspace.") % {:region => pvs_region}
+    end
+
+    region_data[:monitoring_endpoint]
   end
 
   def iam_access_token
@@ -176,19 +158,24 @@ class ManageIQ::Providers::IbmCloud::PowerVirtualServers::CloudManager::MetricsC
 
   # Collapse raw API datapoints into per-counter arrays, converting byte-based
   # metrics to KB/s (matching the unit_key declared in VIM_STYLE_COUNTERS).
+  #
+  # Each datapoint returned by IBM Cloud Monitoring has the shape:
+  #   { "t" => <unix_timestamp_integer>,
+  #     "d" => [cpu_pct, mem_pct, net_in_bytes, net_out_bytes, disk_read_bytes, disk_write_bytes] }
+  # Index positions correspond to the order declared in POWERVS_METRICS.
   def consolidate_data(datapoints)
     dataset = {
-      :timestamps              => [],
-      :cpu_usage_rate_average  => [],
+      :timestamps                 => [],
+      :cpu_usage_rate_average     => [],
       :mem_usage_absolute_average => [],
-      :net_usage_rate_average  => [],
-      :disk_usage_rate_average => [],
+      :net_usage_rate_average     => [],
+      :disk_usage_rate_average    => [],
     }
     Array(datapoints).each do |dp|
-      dataset[:timestamps]              << dp["t"]
-      dataset[:cpu_usage_rate_average]  << dp["d"][0].to_f
-      dataset[:mem_usage_absolute_average] << dp["d"][1].to_f
-      # Network: sum in+out bytes, convert to KB/s (sampling = 60s intervals)
+      dataset[:timestamps]                 << dp["t"]
+      dataset[:cpu_usage_rate_average]     << dp["d"][0].to_f  # cpu_pct (%)
+      dataset[:mem_usage_absolute_average] << dp["d"][1].to_f  # mem_pct (%)
+      # Network: sum in+out bytes, convert to KB/s
       dataset[:net_usage_rate_average]  << (dp["d"][2].to_f + dp["d"][3].to_f) / 1.kilobyte
       # Disk: sum read+write bytes, convert to KB/s
       dataset[:disk_usage_rate_average] << (dp["d"][4].to_f + dp["d"][5].to_f) / 1.kilobyte
