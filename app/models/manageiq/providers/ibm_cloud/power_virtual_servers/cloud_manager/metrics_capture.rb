@@ -176,9 +176,9 @@ class ManageIQ::Providers::IbmCloud::PowerVirtualServers::CloudManager::MetricsC
       dataset[:cpu_usage_rate_average]     << dp["d"][0].to_f  # cpu_pct (%)
       dataset[:mem_usage_absolute_average] << dp["d"][1].to_f  # mem_pct (%)
       # Network: sum in+out bytes, convert to KB/s
-      dataset[:net_usage_rate_average]  << (dp["d"][2].to_f + dp["d"][3].to_f) / 1.kilobyte
+      dataset[:net_usage_rate_average]  << ((dp["d"][2].to_f + dp["d"][3].to_f) / 1.kilobyte)
       # Disk: sum read+write bytes, convert to KB/s
-      dataset[:disk_usage_rate_average] << (dp["d"][4].to_f + dp["d"][5].to_f) / 1.kilobyte
+      dataset[:disk_usage_rate_average] << ((dp["d"][4].to_f + dp["d"][5].to_f) / 1.kilobyte)
     end
     dataset
   end
