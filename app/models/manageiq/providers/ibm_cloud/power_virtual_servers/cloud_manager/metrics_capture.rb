@@ -187,12 +187,10 @@ class ManageIQ::Providers::IbmCloud::PowerVirtualServers::CloudManager::MetricsC
   # 20s realtime buckets ManageIQ expects (same pattern as VPC).
   def store_datapoints_with_interpolation!(end_time, timestamps, datapoints, counter_key, counter_values)
     timestamps.zip(datapoints).each do |timestamp, value|
-      counter_values.store_path(Time.at(timestamp).utc, counter_key, value)
+      [timestamp, timestamp + 20, timestamp + 40].each do |ts|
+        next if ts > end_time
 
-      [timestamp + 20, timestamp + 40].each do |interpolated_ts|
-        next if interpolated_ts > end_time
-
-        counter_values.store_path(Time.at(interpolated_ts).utc, counter_key, value)
+        counter_values.store_path(Time.at(ts).utc, counter_key, value)
       end
     end
   end
